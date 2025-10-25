@@ -12,6 +12,7 @@ import requests  # Library to make HTTP requests (to call the API)
 import pandas as pd  # Library for data manipulation and analysis (using DataFrames)
 from openpyxl import load_workbook  # Library to load and modify an existing Excel workbook
 from openpyxl.utils import get_column_letter  # Utility to convert a column index (1) to a letter ('A')
+from openpyxl.chart import LineChart, Reference  # Import chart components
 
 # Define the base URL for the Alpha Vantage API
 ALPHA_VANTAGE_API_URL = "https://www.alphavantage.co/query"
@@ -20,6 +21,7 @@ ALPHA_VANTAGE_API_URL = "https://www.alphavantage.co/query"
 def fetch_alpha_vantage_data(function: str, symbol: str, api_key: str):
     """
     Fetches data from the Alpha Vantage API for a specific function and symbol.
+    Includes error checking for common API-level messages.
     """
     # Prepare the query parameters (e.g., ?function=INCOME_STATEMENT&symbol=AAPL...)
     params = {"function": function, "symbol": symbol, "apikey": api_key}
@@ -27,11 +29,22 @@ def fetch_alpha_vantage_data(function: str, symbol: str, api_key: str):
     # Send an HTTP GET request to the API URL with the specified parameters
     response = requests.get(ALPHA_VANTAGE_API_URL, params=params)
     
-    # Check if the request was successful; if not (e.g., 404, 500), raise an error
+    # Check if the request was successful (e.g., 404, 500)
     response.raise_for_status()
     
-    # Parse the JSON response text into a Python dictionary and return it
-    return response.json()
+    # Parse the JSON response text into a Python dictionary
+    json_data = response.json()
+    
+    # --- NEW: Check for API-level errors in the JSON response ---
+    if "Error Message" in json_data:
+        raise Exception(f"API Error for {function} {symbol}: {json_data['Error Message']}")
+    if "Information" in json_data:
+        raise Exception(f"API Info for {function} {symbol}: {json_data['Information']} (This often means you've hit a rate limit)")
+    if not json_data: # Handle empty JSON response {}
+        raise Exception(f"API Error for {function} {symbol}: Received empty response.")
+
+    # Return the dictionary
+    return json_data
 
 
 def safe_convert_to_float(data_dict: dict, key: str):
@@ -73,6 +86,11 @@ def build_quarterly_dataframe(ticker: str, api_key: str) -> pd.DataFrame:
     # This assumes reports are in the same chronological order (newest first).
     num_reports = min(len(income_reports), len(balance_sheet_reports), len(cash_flow_reports))
     
+    # If num_reports is 0, print the warning
+    if num_reports == 0:
+        print("⚠️ Warning: No quarterly data fetched. Output may be incomplete.")
+        return pd.DataFrame() # Return an empty DataFrame
+        
     for i in range(num_reports):
         # Get the specific report dictionaries for the current period (index i)
         income_dict = income_reports[i]
@@ -138,23 +156,18 @@ def build_quarterly_dataframe(ticker: str, api_key: str) -> pd.DataFrame:
     quarterly_df = pd.DataFrame(quarterly_data_rows)
     
     # --- TTM (Trailing Twelve Months) Calculations ---
-    # Check if the DataFrame is empty (e.g., bad ticker) before proceeding
-    if not quarterly_df.empty:
-        # Sort by date ascending (oldest to newest) to correctly calculate a rolling sum
-        quarterly_df = quarterly_df.sort_values(by="Date", ascending=True).reset_index(drop=True)
-        
-        # Calculate TTM metrics as a 4-quarter rolling sum.
-        # `min_periods=4` ensures we only get a value when we have 4 full quarters of data.
-        quarterly_df['TTM CFFO'] = quarterly_df['CFFO'].rolling(window=4, min_periods=4).sum()
-        quarterly_df['TTM Revenue'] = quarterly_df['Revenue'].rolling(window=4, min_periods=4).sum()
-        quarterly_df['TTM Net Income'] = quarterly_df['Net Income'].rolling(window=4, min_periods=4).sum()
-        
-        # Sort back to newest-first (descending) to match the API's original order
-        quarterly_df = quarterly_df.sort_values(by="Date", ascending=False).reset_index(drop=True)
-    else:
-        # Handle case where no data was fetched
-        print("⚠️ Warning: No quarterly data fetched. Output may be incomplete.")
-        return pd.DataFrame() # Return an empty DataFrame
+    # We already checked if the df is empty by checking num_reports
+    # Sort by date ascending (oldest to newest) to correctly calculate a rolling sum
+    quarterly_df = quarterly_df.sort_values(by="Date", ascending=True).reset_index(drop=True)
+    
+    # Calculate TTM metrics as a 4-quarter rolling sum.
+    # `min_periods=4` ensures we only get a value when we have 4 full quarters of data.
+    quarterly_df['TTM CFFO'] = quarterly_df['CFFO'].rolling(window=4, min_periods=4).sum()
+    quarterly_df['TTM Revenue'] = quarterly_df['Revenue'].rolling(window=4, min_periods=4).sum()
+    quarterly_df['TTM Net Income'] = quarterly_df['Net Income'].rolling(window=4, min_periods=4).sum()
+    
+    # Sort back to newest-first (descending) to match the API's original order
+    quarterly_df = quarterly_df.sort_values(by="Date", ascending=False).reset_index(drop=True)
 
     # --- Transpose DataFrame ---
     # Pivot the table: Dates become columns, metrics become rows
@@ -212,6 +225,11 @@ def build_annual_dataframe(ticker: str, api_key: str) -> pd.DataFrame:
     # Iterate through the reports
     num_reports = min(len(income_reports), len(balance_sheet_reports), len(cash_flow_reports))
     
+    # If num_reports is 0, print the warning and return an empty DataFrame
+    if num_reports == 0:
+        print("⚠️ Warning: No annual data fetched. Output may be incomplete.")
+        return pd.DataFrame()
+        
     for i in range(num_reports):
         # Get the specific report dictionaries for the current period (index i)
         income_dict = income_reports[i]
@@ -269,14 +287,12 @@ def build_annual_dataframe(ticker: str, api_key: str) -> pd.DataFrame:
 
     # Create the initial DataFrame from the list of row dictionaries
     annual_df = pd.DataFrame(annual_data_rows)
-    
-    # Check if the DataFrame is empty before transposing
-    if annual_df.empty:
-        print("⚠️ Warning: No annual data fetched. Output may be incomplete.")
-        return pd.DataFrame() # Return an empty DataFrame
 
     # --- Transpose DataFrame ---
     annual_df = annual_df.set_index("Date").T
+
+    # --- FIX: Sort columns by date (oldest to newest) for correct chart plotting ---
+    annual_df = annual_df.sort_index(axis=1, ascending=True)
 
     # --- Unit Conversion (to Billions) ---
     metrics_to_convert = [idx_label for idx_label in annual_df.index if idx_label not in ["Gross Margin", "EPS"]]
@@ -416,12 +432,12 @@ def export_to_excel(quarterly_df: pd.DataFrame, annual_df: pd.DataFrame, definit
     
     # --- Format Financial Sheets ---
     # Get the "Quarterly Data" worksheet object and format it
-    if "Quarterly Data" in workbook.sheetnames:
+    if "Quarterly Data" in workbook.sheetnames and not quarterly_df.empty:
         data_worksheet = workbook["Quarterly Data"]
         _format_financials_sheet(data_worksheet)
 
     # Get the "Annual Data" worksheet object and format it
-    if "Annual Data" in workbook.sheetnames:
+    if "Annual Data" in workbook.sheetnames and not annual_df.empty:
         annual_worksheet = workbook["Annual Data"]
         _format_financials_sheet(annual_worksheet)
 
@@ -433,7 +449,57 @@ def export_to_excel(quarterly_df: pd.DataFrame, annual_df: pd.DataFrame, definit
         # Set a fixed (wider) width for the "Definition" column (Column B)
         definitions_worksheet.column_dimensions[get_column_letter(2)].width = 50
 
-    # Save all the formatting changes back to the Excel file
+    # --- NEW: Create Charts Sheet ---
+    # Only create charts if the annual_df was not empty
+    if "Annual Data" in workbook.sheetnames and not annual_df.empty:
+        annual_worksheet = workbook["Annual Data"] # Get the sheet again
+        
+        # Check if there is data to chart
+        if annual_worksheet.max_row <= 1 or annual_worksheet.max_column <= 1:
+            print("⚠️ Skipping chart generation: No annual data to plot.")
+        else:
+            # Create the new charts sheet
+            chart_worksheet = workbook.create_sheet("Charts")
+            print("📈 Generating charts...")
+
+            # Get dimensions of the annual data
+            max_row = annual_worksheet.max_row
+            max_col = annual_worksheet.max_column
+
+            # Define the x-axis (categories) - the dates in row 1
+            # We now read from oldest (col 2) to newest (max_col)
+            categories_ref = Reference(annual_worksheet, min_col=2, min_row=1, max_col=max_col, max_row=1)
+
+            # Loop through each data row (each metric)
+            for row_index in range(2, max_row + 1):
+                # Create a new line chart
+                chart = LineChart()
+                
+                # Define the data series (the values in the current row)
+                data_ref = Reference(annual_worksheet, min_col=2, min_row=row_index, max_col=max_col, max_row=row_index)
+                
+                # Add the data to the chart
+                chart.add_data(data_ref, titles_from_data=False)
+                
+                # Set the x-axis categories
+                chart.set_categories(categories_ref)
+                
+                # Get the metric name for the chart title
+                chart.title = annual_worksheet.cell(row=row_index, column=1).value
+                
+                # Style the chart
+                chart.legend = None # Hide the legend
+                chart.y_axis.title = "Value"
+                chart.x_axis.title = "Fiscal Year End"
+
+                # Calculate where to place the chart on the sheet
+                # This stacks them vertically, with 15 rows per chart
+                anchor_cell = f"A{(row_index - 2) * 15 + 1}"
+                
+                # Add the chart to the "Charts" sheet
+                chart_worksheet.add_chart(chart, anchor_cell)
+
+    # Save all the formatting and new charts back to the Excel file
     workbook.save(output_filename)
     
     # Print a success message to the console
@@ -471,6 +537,7 @@ def main():
             
     except Exception as error:
         # Catch any exceptions that occurred
+        # With the new error handling, this will now print API limit errors
         print(f"❌ An error occurred: {error}")
 
 
