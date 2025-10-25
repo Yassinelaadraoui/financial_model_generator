@@ -41,6 +41,8 @@ A Python script that fetches comprehensive financial data (Income Statement, Bal
 
 ```bash
 pip install requests pandas openpyxl
+```
+
 Alpha Vantage API Key: Get a free key here.
 
 Note: The free key is limited (25 calls per day). Each run uses 6 API calls (3 quarterly + 3 annual). Exceeding this limit will stop the script until the next day.
